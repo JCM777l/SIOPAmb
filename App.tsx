@@ -1,37 +1,66 @@
-
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { HashRouter, Routes, Route, useNavigate, useLocation, Navigate } from 'react-router-dom';
 import { User, ActivityReport } from './types';
 import { RANKS, PLATOONS, PLATOONS_INTEGRATED, PLATOONS_FORM, SCALE_TYPES, NUMERIC_OPTIONS_1_TO_10, SilverStar } from './constants';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 import * as XLSX from 'xlsx';
+import { auth, db } from './firebase';
+import { 
+    onAuthStateChanged, 
+    createUserWithEmailAndPassword, 
+    signInWithEmailAndPassword, 
+    signOut, 
+    updatePassword,
+    AuthErrorCodes
+} from 'firebase/auth';
+import { doc, setDoc, getDoc, addDoc, collection, getDocs, query, where, writeBatch, updateDoc } from 'firebase/firestore';
 
 
 // --- Authentication Context ---
 const AuthContext = React.createContext<{
   currentUser: User | null;
-  login: (user: User) => void;
+  loading: boolean;
   logout: () => void;
 } | null>(null);
 
 const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [currentUser, setCurrentUser] = useState<User | null>(() => {
-    const storedUser = localStorage.getItem('currentUser');
-    return storedUser ? JSON.parse(storedUser) : null;
-  });
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [loading, setLoading] = useState(true);
 
-  const login = (user: User) => {
-    setCurrentUser(user);
-    localStorage.setItem('currentUser', JSON.stringify(user));
-  };
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      if (user) {
+        // User is signed in, see docs for a list of available properties
+        // https://firebase.google.com/docs/reference/js/firebase.User
+        const userDocRef = doc(db, 'users', user.uid);
+        const userDoc = await getDoc(userDocRef);
+        if (userDoc.exists()) {
+          const userData = userDoc.data();
+          setCurrentUser({
+            id: user.uid,
+            username: userData.username,
+            rank: userData.rank,
+            platoon: userData.platoon,
+          });
+        } else if (user.email === 'adm@siopamb.com') { // Handle admin case
+           setCurrentUser({ id: 'admin', username: 'adm', rank: 'Admin', platoon: 'Admin' });
+        }
+      } else {
+        // User is signed out
+        setCurrentUser(null);
+      }
+      setLoading(false);
+    });
 
-  const logout = () => {
-    setCurrentUser(null);
-    localStorage.removeItem('currentUser');
+    return () => unsubscribe();
+  }, []);
+
+  const logout = async () => {
+    await signOut(auth);
   };
 
   return (
-    <AuthContext.Provider value={{ currentUser, login, logout }}>
+    <AuthContext.Provider value={{ currentUser, loading, logout }}>
       {children}
     </AuthContext.Provider>
   );
@@ -105,69 +134,69 @@ const Modal: React.FC<{ title: string; onClose: () => void; children: React.Reac
 
 
 // --- Page Components ---
-
 const LoginPage = () => {
-  const navigate = useNavigate();
-  const { login } = useAuth();
-  const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
-  const [error, setError] = useState('');
+    const navigate = useNavigate();
+    const [username, setUsername] = useState('');
+    const [password, setPassword] = useState('');
+    const [error, setError] = useState('');
+    const [loading, setLoading] = useState(false);
 
-  const handleLogin = (e: React.FormEvent) => {
-    e.preventDefault();
-    // Admin Login
-    if (username.toLowerCase() === 'adm') {
-      const adminPassword = localStorage.getItem('adminPassword') || 'adm';
-      if (password === adminPassword) {
-        const adminUser: User = { id: 'admin', username: 'adm', rank: 'Admin', platoon: 'Admin' };
-        login(adminUser);
-        navigate('/admin');
-        return;
-      }
-    }
+    const handleLogin = async (e: React.FormEvent) => {
+        e.preventDefault();
+        setLoading(true);
+        setError('');
+        
+        // Use a dummy domain for email-based auth
+        const email = username.toLowerCase() === 'adm' 
+            ? 'adm@siopamb.com'
+            : `${username.toLowerCase()}@siopamb.com`;
 
-    // Regular User Login
-    const users: User[] = JSON.parse(localStorage.getItem('users') || '[]');
-    const storedPasswords = JSON.parse(localStorage.getItem('userPasswords') || '{}');
-    const user = users.find(u => u.username.toLowerCase() === username.toLowerCase());
+        try {
+            await signInWithEmailAndPassword(auth, email, password);
+            // onAuthStateChanged will handle navigation
+        } catch (err: any) {
+            if (err.code === AuthErrorCodes.INVALID_PASSWORD || err.code === AuthErrorCodes.USER_DELETED) {
+                setError('Nome de guerra ou senha inválidos.');
+            } else {
+                setError('Ocorreu um erro ao tentar fazer login.');
+            }
+            setLoading(false);
+        }
+    };
 
-    if (user && storedPasswords[user.id] === password) {
-      login(user);
-      navigate('/dashboard');
-    } else {
-      setError('Nome de usuário ou senha inválidos.');
-    }
-  };
-
-
-  return (
-    <div className="w-full max-w-md bg-black/60 backdrop-blur-sm p-8 rounded-lg shadow-2xl border border-gray-700">
-      <div className="text-center mb-6">
-        <h1 className="text-3xl font-bold text-white">SIOPAmb</h1>
-        <p className="text-gray-300">Sistema de Informações Operacionais do Policiamento Ambiental</p>
-      </div>
-      <form onSubmit={handleLogin} className="space-y-6">
-        {error && <p className="text-red-400 text-center">{error}</p>}
-        <Input label="Nome de Guerra" type="text" value={username} onChange={e => setUsername(e.target.value)} required />
-        <Input label="Senha" type="password" value={password} onChange={e => setPassword(e.target.value)} required />
-        <button type="submit" className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-md transition-colors duration-300">
-          Entrar
-        </button>
-        <button type="button" onClick={() => navigate('/signup')} className="w-full bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded-md transition-colors duration-300 mt-2">
-          Cadastre-se
-        </button>
-      </form>
-    </div>
-  );
+    return (
+        <div className="w-full max-w-md bg-black/60 backdrop-blur-sm p-8 rounded-lg shadow-2xl border border-gray-700">
+            <div className="text-center mb-6">
+                <h1 className="text-3xl font-bold text-white">SIOPAmb</h1>
+                <p className="text-gray-300">Sistema de Informações Operacionais do Policiamento Ambiental</p>
+            </div>
+            <form onSubmit={handleLogin} className="space-y-6">
+                {error && <p className="text-red-400 text-center">{error}</p>}
+                <Input label="Nome de Guerra" type="text" value={username} onChange={e => setUsername(e.target.value)} required />
+                <Input label="Senha" type="password" value={password} onChange={e => setPassword(e.target.value)} required />
+                <button type="submit" disabled={loading} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-md transition-colors duration-300 disabled:bg-gray-500">
+                    {loading ? 'Entrando...' : 'Entrar'}
+                </button>
+                <button type="button" onClick={() => navigate('/signup')} className="w-full bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded-md transition-colors duration-300 mt-2">
+                    Cadastre-se
+                </button>
+            </form>
+        </div>
+    );
 };
 
 const SignUpPage = () => {
     const navigate = useNavigate();
     const [error, setError] = useState('');
     const [success, setSuccess] = useState('');
+    const [loading, setLoading] = useState(false);
 
-    const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
+    const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
         e.preventDefault();
+        setError('');
+        setSuccess('');
+        setLoading(true);
+
         const formData = new FormData(e.currentTarget);
         const username = formData.get('username') as string;
         const password = formData.get('password') as string;
@@ -176,41 +205,53 @@ const SignUpPage = () => {
 
         if (!username || !password || !rank || !platoon) {
             setError('Todos os campos são obrigatórios.');
+            setLoading(false);
             return;
         }
 
         const formatUsername = (name: string) => {
             return name.charAt(0).toUpperCase() + name.slice(1).toLowerCase();
         };
-
         const formattedUsername = formatUsername(username);
+        const email = `${formattedUsername.toLowerCase()}@siopamb.com`;
 
-        const users: User[] = JSON.parse(localStorage.getItem('users') || '[]');
-        if (users.some(u => u.username.toLowerCase() === formattedUsername.toLowerCase())) {
-            setError('Este nome de guerra já está em uso.');
-            setSuccess('');
-            return;
+        try {
+            // Check if username already exists in Firestore
+            const usersRef = collection(db, "users");
+            const q = query(usersRef, where("username", "==", formattedUsername));
+            const querySnapshot = await getDocs(q);
+            if (!querySnapshot.empty) {
+                setError('Este nome de guerra já está em uso.');
+                setLoading(false);
+                return;
+            }
+
+            // Create user in Firebase Auth
+            const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+            const user = userCredential.user;
+
+            // Store additional user info in Firestore
+            await setDoc(doc(db, "users", user.uid), {
+                username: formattedUsername,
+                rank,
+                platoon,
+            });
+
+            setSuccess('Cadastro realizado com sucesso! Você será redirecionado para o login.');
+            setTimeout(() => navigate('/'), 2000);
+
+        } catch (err: any) {
+            if (err.code === AuthErrorCodes.EMAIL_EXISTS) {
+                 setError('Este nome de guerra já está em uso.');
+            } else if (err.code === AuthErrorCodes.WEAK_PASSWORD) {
+                setError('A senha deve ter pelo menos 6 caracteres.');
+            } else {
+                setError('Ocorreu um erro ao criar a conta.');
+            }
+        } finally {
+            setLoading(false);
         }
-
-        const newUser: User = {
-            id: crypto.randomUUID(),
-            username: formattedUsername,
-            rank,
-            platoon,
-        };
-        
-        const storedPasswords = JSON.parse(localStorage.getItem('userPasswords') || '{}');
-        storedPasswords[newUser.id] = password;
-
-        users.push(newUser);
-        localStorage.setItem('users', JSON.stringify(users));
-        localStorage.setItem('userPasswords', JSON.stringify(storedPasswords));
-
-        setError('');
-        setSuccess('Cadastro realizado com sucesso! Você será redirecionado para o login.');
-        setTimeout(() => navigate('/'), 2000);
     };
-
 
     return (
         <div className="w-full max-w-lg bg-black/60 backdrop-blur-sm p-8 rounded-lg shadow-2xl border border-gray-700">
@@ -219,7 +260,7 @@ const SignUpPage = () => {
                 {error && <p className="text-red-400 text-center">{error}</p>}
                 {success && <p className="text-green-400 text-center">{success}</p>}
                 <Input label="Nome de Guerra" name="username" type="text" pattern="[A-Za-z\s]+" title="Apenas letras são permitidas" required />
-                <Input label="Senha" name="password" type="password" required />
+                <Input label="Senha (mínimo 6 caracteres)" name="password" type="password" required />
                 <Select label="Graduação/Posto" name="rank" required>
                     <option value="">Selecione...</option>
                     {RANKS.map(r => <option key={r} value={r}>{r}</option>)}
@@ -232,8 +273,8 @@ const SignUpPage = () => {
                     <button type="button" onClick={() => navigate('/')} className="w-full bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded-md transition-colors duration-300">
                       Voltar
                     </button>
-                    <button type="submit" className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-md transition-colors duration-300">
-                      Cadastrar
+                    <button type="submit" disabled={loading} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-md transition-colors duration-300 disabled:bg-gray-500">
+                      {loading ? 'Cadastrando...' : 'Cadastrar'}
                     </button>
                 </div>
             </form>
@@ -254,13 +295,12 @@ const UserDashboard = () => {
     const [passwordError, setPasswordError] = useState('');
     const [passwordSuccess, setPasswordSuccess] = useState('');
 
-    const handleActivitySubmit = (e: React.FormEvent<HTMLFormElement>) => {
+    const handleActivitySubmit = async (e: React.FormEvent<HTMLFormElement>) => {
         e.preventDefault();
         if (!currentUser || isSubmitting) return;
         setIsSubmitting(true);
         const formData = new FormData(e.currentTarget);
-        const report: ActivityReport = {
-            id: crypto.randomUUID(),
+        const reportData = {
             userId: currentUser.id,
             submittedBy: currentUser.username,
             submittedAt: new Date().toISOString(),
@@ -305,18 +345,20 @@ const UserDashboard = () => {
             horasPoliciamentoNautico: formData.get('horasPoliciamentoNautico') as string,
         };
 
-        const reports: ActivityReport[] = JSON.parse(localStorage.getItem('activityReports') || '[]');
-        reports.push(report);
-        localStorage.setItem('activityReports', JSON.stringify(reports));
-
-        setSubmitMessage('Atividade registrada com sucesso! Redirecionando para o login...');
-        setTimeout(() => {
-            logout();
-            navigate('/');
-        }, 2000);
+        try {
+            await addDoc(collection(db, "reports"), reportData);
+            setSubmitMessage('Atividade registrada com sucesso! Redirecionando para o login...');
+            setTimeout(() => {
+                logout();
+                navigate('/');
+            }, 2000);
+        } catch (error) {
+            setSubmitMessage('Falha ao registrar atividade. Tente novamente.');
+            setIsSubmitting(false);
+        }
     };
 
-    const handleChangePassword = (e: React.FormEvent<HTMLFormElement>) => {
+    const handleChangePassword = async (e: React.FormEvent<HTMLFormElement>) => {
         e.preventDefault();
         setPasswordError('');
         setPasswordSuccess('');
@@ -325,28 +367,30 @@ const UserDashboard = () => {
             setPasswordError('As senhas não coincidem.');
             return;
         }
-        if (newPassword.length < 4) {
-            setPasswordError('A senha deve ter pelo menos 4 caracteres.');
+        if (newPassword.length < 6) {
+            setPasswordError('A senha deve ter pelo menos 6 caracteres.');
             return;
         }
-        if (!currentUser) {
+        if (!auth.currentUser) {
             setPasswordError('Usuário não encontrado. Por favor, faça login novamente.');
             return;
         }
-
-        const storedPasswords = JSON.parse(localStorage.getItem('userPasswords') || '{}');
-        storedPasswords[currentUser.id] = newPassword;
-        localStorage.setItem('userPasswords', JSON.stringify(storedPasswords));
-
-        setPasswordSuccess('Senha alterada com sucesso! Você será redirecionado para fazer login.');
-        setNewPassword('');
-        setConfirmPassword('');
-
-        setTimeout(() => {
-            setIsChangingPassword(false);
-            logout();
-            navigate('/');
-        }, 2500);
+        
+        try {
+            await updatePassword(auth.currentUser, newPassword);
+            setPasswordSuccess('Senha alterada com sucesso! Você será redirecionado para fazer login.');
+            setNewPassword('');
+            setConfirmPassword('');
+            setTimeout(() => {
+                setIsChangingPassword(false);
+                logout();
+                navigate('/');
+            }, 2500);
+        } catch (error: any) {
+            // Re-authentication might be required for this operation.
+            // For simplicity, we just show an error.
+            setPasswordError('Erro ao alterar a senha. Tente fazer logout e login novamente.');
+        }
     };
 
     const handleLogout = () => {
@@ -368,7 +412,7 @@ const UserDashboard = () => {
                     <form onSubmit={handleChangePassword} className="space-y-4">
                         {passwordError && <p className="text-red-400 text-center">{passwordError}</p>}
                         {passwordSuccess && <p className="text-green-400 text-center">{passwordSuccess}</p>}
-                        <Input label="Nova Senha" type="password" value={newPassword} onChange={e => setNewPassword(e.target.value)} required />
+                        <Input label="Nova Senha (mínimo 6 caracteres)" type="password" value={newPassword} onChange={e => setNewPassword(e.target.value)} required />
                         <Input label="Confirmar Nova Senha" type="password" value={confirmPassword} onChange={e => setConfirmPassword(e.target.value)} required />
                         <button type="submit" className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-md transition-colors duration-300 mt-2">
                             Salvar Nova Senha
@@ -397,19 +441,15 @@ const UserDashboard = () => {
                     </div>
                     :
                     <form onSubmit={handleActivitySubmit} className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-                        {/* Row 1 */}
+                         {/* Fields remain the same */}
                         <Select name="equipesIntegradas" label="Equipes Integradas"><option value="">Selecione</option>{PLATOONS_INTEGRATED.map(p => <option key={p} value={p}>{p}</option>)}</Select>
                         <Input name="numeroRso" label="Número do RSO" type="text" maxLength={6} pattern="\d{0,6}" title="Máximo 6 dígitos numéricos" />
                         <Select name="tipoEscala" label="Tipo de Escala"><option value="">Selecione</option>{SCALE_TYPES.map(s => <option key={s} value={s}>{s}</option>)}</Select>
                         <Input name="tempoTrabalho" label="Tempo de Trabalho" type="number" step="0.1" max="999" />
-
-                        {/* Row 2 */}
                         <Select name="pelotao" label="Pelotão"><option value="">Selecione</option>{PLATOONS_FORM.map(p => <option key={p} value={p}>{p}</option>)}</Select>
                         <Input name="encarregadoEquipe" label="Encarregado da Equipe" type="text" pattern="[A-Za-z\s]+" title="Apenas letras" />
                         <Input name="primeiroAuxiliar" label="1º Auxiliar" type="text" pattern="[A-Za-z\s]+" title="Apenas letras" />
                         <Input name="segundoAuxiliar" label="2º Auxiliar" type="text" pattern="[A-Za-z\s]+" title="Apenas letras" />
-
-                        {/* Fiscalizações */}
                         <NumberSelect name="fiscalizacaoTCRA" label="Fiscalização de TCRA (un.)" />
                         <NumberSelect name="fiscalizacoesPatioMadeireiro" label="Fisc. Pátio Madeireiro (un.)" />
                         <NumberSelect name="fiscalizacoesUC" label="Fisc. UC (exceto RPPN) (un.)" />
@@ -418,8 +458,6 @@ const UserDashboard = () => {
                         <NumberSelect name="fiscalizacoesCaca" label="Fisc. Caça (em AISPA) (un.)" />
                         <NumberSelect name="fiscalizacoesPesca" label="Fisc. Pesca (em AISPA) (un.)" />
                         <NumberSelect name="fiscalizacoesPiracema" label="Fisc. em Piracema (un.)" />
-                        
-                        {/* Ocorrências */}
                         <NumberSelect name="tva" label="TVA (un.)" />
                         <NumberSelect name="boPamb" label="BO/PAmb (un.)" />
                         <NumberSelect name="aia" label="AIA (un.)" />
@@ -428,8 +466,6 @@ const UserDashboard = () => {
                         <NumberSelect name="palmitoInNatura" label="Palmito in natura (un.)" />
                         <Input name="palmitoBeneficiado" label="Palmito beneficiado (kg)" type="number" step="0.01" max="999.99" />
                         <Input name="pescadoApreendido" label="Pescado Apreendido (kg)" type="number" step="0.01" max="999.99" />
-                        
-                        {/* Apreensões e Abordagens */}
                         <NumberSelect name="animaisApreendidos" label="Animais Apreendidos (un.)" />
                         <NumberSelect name="pessoasAbordadas" label="Pessoas Abordadas (un.)" />
                         <NumberSelect name="pessoasAutuadasAIA" label="Pessoas Autuadas em AIA (un.)" />
@@ -439,15 +475,11 @@ const UserDashboard = () => {
                         <NumberSelect name="armasBrancasApreendidas" label="Armas Brancas Apreendidas (un.)" />
                         <NumberSelect name="municoesApreendidas" label="Munições Apreendidas (un.)" />
                         <Input name="entorpecentesApreendidos" label="Entorpecentes Apreendidos (kg)" type="number" step="0.01" max="999.99" />
-                        
-                        {/* Vistorias */}
                         <NumberSelect name="embarcacoesVistoriadas" label="Embarcações Vistoriadas (un.)" />
                         <NumberSelect name="embarcacoesApreendidas" label="Embarcações Apreendidas (un.)" />
                         <NumberSelect name="veiculosVistoriados" label="Veículos Vistoriados (un.)" />
                         <NumberSelect name="veiculosApreendidos" label="Veículos Apreendidos (un.)" />
                         <NumberSelect name="veiculosRecuperados" label="Veículos Recuperados (un.)" />
-
-                        {/* Outros */}
                         <div className="lg:col-span-3">
                             <Input name="horasPoliciamentoNautico" label="Horas de Policiamento Náutico" type="number" step="0.1" max="999.9" />
                         </div>
@@ -465,7 +497,6 @@ const UserDashboard = () => {
 };
 
 // --- Admin Dashboard & User Management ---
-
 const UserForm: React.FC<{
     userToEdit?: User | null;
     onSave: (user: User, password?: string) => void;
@@ -486,16 +517,10 @@ const UserForm: React.FC<{
             return;
         }
 
-        const allUsers: User[] = JSON.parse(localStorage.getItem('users') || '[]');
-        if (!userToEdit && allUsers.some(u => u.username.toLowerCase() === username.toLowerCase())) {
-            setError('Este nome de guerra já está em uso.');
-            return;
-        }
-
         const formattedUsername = username.charAt(0).toUpperCase() + username.slice(1).toLowerCase();
 
         const userData: User = {
-            id: userToEdit?.id || crypto.randomUUID(),
+            id: userToEdit?.id || '', // ID will be set on creation
             username: userToEdit ? userToEdit.username : formattedUsername,
             rank,
             platoon,
@@ -508,7 +533,9 @@ const UserForm: React.FC<{
         <form onSubmit={handleSubmit} className="space-y-4">
             {error && <p className="text-red-400 text-center mb-2">{error}</p>}
             <Input label="Nome de Guerra" name="username" type="text" defaultValue={userToEdit?.username} disabled={!!userToEdit} required />
-            <Input label={`Senha ${userToEdit ? '(deixe em branco para não alterar)' : ''}`} name="password" type="password" />
+             {!userToEdit && (
+                <Input label="Senha (mínimo 6 caracteres)" name="password" type="password" required />
+            )}
             <Select label="Graduação/Posto" name="rank" defaultValue={userToEdit?.rank} required>
                 {RANKS.map(r => <option key={r} value={r}>{r}</option>)}
             </Select>
@@ -527,46 +554,36 @@ const UserForm: React.FC<{
 const AdminDashboard = () => {
     const { logout } = useAuth();
     const navigate = useNavigate();
-    const [reports, setReports] = useState<ActivityReport[]>([]);
+    const [reports, setReports] = useState<(ActivityReport & {id: string})[]>([]);
     const [users, setUsers] = useState<User[]>([]);
     const [view, setView] = useState<'dashboard' | 'users'>('dashboard');
     const [editingUser, setEditingUser] = useState<User | null>(null);
     const [isCreatingUser, setIsCreatingUser] = useState(false);
-    const [deletingUser, setDeletingUser] = useState<User | null>(null);
     const [isChangingAdminPassword, setIsChangingAdminPassword] = useState(false);
+    const [loadingData, setLoadingData] = useState(true);
     
+    const loadData = useCallback(async () => {
+        setLoadingData(true);
+        const reportsQuerySnapshot = await getDocs(collection(db, "reports"));
+        const reportsData = reportsQuerySnapshot.docs.map(doc => ({ ...doc.data(), id: doc.id })) as (ActivityReport & {id: string})[];
+        
+        const usersQuerySnapshot = await getDocs(collection(db, "users"));
+        const usersData = usersQuerySnapshot.docs.map(doc => ({ ...doc.data(), id: doc.id })) as User[];
+        
+        setReports(reportsData);
+        setUsers(usersData);
+        setLoadingData(false);
+    }, []);
+
     useEffect(() => {
         loadData();
-    }, []);
+    }, [loadData]);
 
-    const loadData = useCallback(() => {
-        const storedReports = JSON.parse(localStorage.getItem('activityReports') || '[]') as ActivityReport[];
-        const storedUsers = JSON.parse(localStorage.getItem('users') || '[]') as User[];
-        setReports(storedReports);
-        setUsers(storedUsers);
-    }, []);
 
     const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-        const file = e.target.files?.[0];
-        if (!file) return;
-
-        const reader = new FileReader();
-        reader.onload = (evt) => {
-            const bstr = evt.target?.result;
-            if (bstr) {
-                const wb = XLSX.read(bstr, { type: 'binary' });
-                const wsname = wb.SheetNames[0];
-                const ws = wb.Sheets[wsname];
-                const data = XLSX.utils.sheet_to_json(ws) as any[];
-                
-                const newReports: ActivityReport[] = data.map(row => ({...row, id: crypto.randomUUID()}));
-                const allReports = [...reports, ...newReports];
-                localStorage.setItem('activityReports', JSON.stringify(allReports));
-                setReports(allReports);
-                alert(`${data.length} registros importados com sucesso!`);
-            }
-        };
-        reader.readAsBinaryString(file);
+        // This function would need significant changes to map excel columns to the new data structure
+        // and handle potential duplicates. For now, it's kept as a placeholder.
+        alert("A importação de XLS foi desativada temporariamente na migração para o Firebase.");
     };
 
     const handleDownload = () => {
@@ -576,47 +593,49 @@ const AdminDashboard = () => {
         XLSX.writeFile(wb, "relatorio_atividades.xlsx");
     };
 
-    const handleSaveUser = (user: User, password?: string) => {
-        const isNewUser = !users.some(u => u.id === user.id);
-        let updatedUsers: User[];
-        const storedPasswords = JSON.parse(localStorage.getItem('userPasswords') || '{}');
+    const handleSaveUser = async (userData: User, password?: string) => {
+        const isNewUser = !editingUser;
 
         if (isNewUser) {
-            updatedUsers = [...users, user];
+            // Create new user
+            if (!password) {
+                alert("Senha é obrigatória para novos usuários.");
+                return;
+            }
+            try {
+                // We must create the auth user first
+                 const userCredential = await createUserWithEmailAndPassword(auth, `${userData.username.toLowerCase()}@siopamb.com`, password);
+                 // Then save their data in firestore
+                 await setDoc(doc(db, "users", userCredential.user.uid), {
+                    username: userData.username,
+                    rank: userData.rank,
+                    platoon: userData.platoon
+                 });
+            } catch (error: any) {
+                if (error.code === AuthErrorCodes.EMAIL_EXISTS) {
+                    alert("Este nome de guerra já está em uso.");
+                } else {
+                    alert("Erro ao criar usuário.");
+                }
+            }
         } else {
-            updatedUsers = users.map(u => (u.id === user.id ? user : u));
+            // Update existing user
+            if (editingUser) {
+                 const userDocRef = doc(db, 'users', editingUser.id);
+                 await updateDoc(userDocRef, {
+                    rank: userData.rank,
+                    platoon: userData.platoon,
+                 });
+            }
         }
-
-        if (password) {
-            storedPasswords[user.id] = password;
-        }
-
-        setUsers(updatedUsers);
-        localStorage.setItem('users', JSON.stringify(updatedUsers));
-        localStorage.setItem('userPasswords', JSON.stringify(storedPasswords));
 
         setIsCreatingUser(false);
         setEditingUser(null);
+        await loadData(); // Reload data to show changes
     };
 
-    const handleDeleteUser = () => {
-        if (!deletingUser) return;
 
-        const updatedUsers = users.filter(u => u.id !== deletingUser.id);
-        const updatedReports = reports.filter(r => r.userId !== deletingUser.id);
-        const storedPasswords = JSON.parse(localStorage.getItem('userPasswords') || '{}');
-        delete storedPasswords[deletingUser.id];
-
-        setUsers(updatedUsers);
-        setReports(updatedReports);
-        localStorage.setItem('users', JSON.stringify(updatedUsers));
-        localStorage.setItem('activityReports', JSON.stringify(updatedReports));
-        localStorage.setItem('userPasswords', JSON.stringify(storedPasswords));
-
-        setDeletingUser(null);
-    };
-
-    const handleChangeAdminPassword = (e: React.FormEvent<HTMLFormElement>) => {
+    const handleChangeAdminPassword = async (e: React.FormEvent<HTMLFormElement>) => {
         e.preventDefault();
         const formData = new FormData(e.currentTarget);
         const newPassword = formData.get('newPassword') as string;
@@ -626,14 +645,20 @@ const AdminDashboard = () => {
             alert('As senhas não coincidem.');
             return;
         }
-        if (newPassword.length < 4) {
-             alert('A senha deve ter pelo menos 4 caracteres.');
+        if (newPassword.length < 6) {
+             alert('A senha deve ter pelo menos 6 caracteres.');
             return;
         }
-
-        localStorage.setItem('adminPassword', newPassword);
-        setIsChangingAdminPassword(false);
-        alert('Senha do administrador alterada com sucesso!');
+        
+        if (auth.currentUser) {
+            try {
+                await updatePassword(auth.currentUser, newPassword);
+                alert('Senha do administrador alterada com sucesso!');
+                setIsChangingAdminPassword(false);
+            } catch (error) {
+                alert('Erro ao alterar senha. Tente fazer logout e login novamente.');
+            }
+        }
     };
 
 
@@ -675,23 +700,10 @@ const AdminDashboard = () => {
                     <UserForm userToEdit={editingUser} onSave={handleSaveUser} onCancel={() => setEditingUser(null)} />
                 </Modal>
             )}
-            {deletingUser && (
-                <Modal title="Confirmar Exclusão" onClose={() => setDeletingUser(null)}>
-                    <p className="text-center text-gray-300">
-                        Tem certeza que deseja excluir o usuário <strong>{deletingUser.username}</strong>?
-                        <br />
-                        Todos os seus registros de atividade também serão apagados.
-                    </p>
-                    <div className="flex items-center space-x-4 pt-6">
-                        <button onClick={() => setDeletingUser(null)} className="w-full bg-gray-600 hover:bg-gray-700 font-bold py-2 px-4 rounded-md">Cancelar</button>
-                        <button onClick={handleDeleteUser} className="w-full bg-red-600 hover:bg-red-700 font-bold py-2 px-4 rounded-md">Excluir</button>
-                    </div>
-                </Modal>
-            )}
             {isChangingAdminPassword && (
                  <Modal title="Alterar Senha do Administrador" onClose={() => setIsChangingAdminPassword(false)}>
                     <form onSubmit={handleChangeAdminPassword} className="space-y-4">
-                        <Input label="Nova Senha" name="newPassword" type="password" required />
+                        <Input label="Nova Senha (mínimo 6 caracteres)" name="newPassword" type="password" required />
                         <Input label="Confirmar Nova Senha" name="confirmPassword" type="password" required />
                         <div className="flex items-center space-x-4 pt-4">
                             <button type="button" onClick={() => setIsChangingAdminPassword(false)} className="w-full bg-gray-600 hover:bg-gray-700 font-bold py-2 px-4 rounded-md">Cancelar</button>
@@ -721,7 +733,8 @@ const AdminDashboard = () => {
             </div>
             
             <div className="flex-grow overflow-y-auto">
-                {view === 'dashboard' && (
+                 {loadingData ? <p className="text-center">Carregando dados...</p> : 
+                    view === 'dashboard' ? (
                     <>
                          <div className="flex space-x-4 mb-6">
                             <label className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-md cursor-pointer">
@@ -792,8 +805,7 @@ const AdminDashboard = () => {
                             </div>
                         </div>
                     </>
-                )}
-                {view === 'users' && (
+                ) : (
                     <div className="bg-gray-800/50 p-4 rounded-lg">
                         <div className="flex justify-between items-center mb-4">
                              <h2 className="text-xl font-semibold">Usuários Cadastrados ({users.length})</h2>
@@ -819,7 +831,6 @@ const AdminDashboard = () => {
                                             <td className="p-3">{user.platoon}</td>
                                             <td className="p-3 text-center">
                                                 <button onClick={() => setEditingUser(user)} className="text-blue-400 hover:text-blue-300 font-semibold mr-4">Editar</button>
-                                                <button onClick={() => setDeletingUser(user)} className="text-red-400 hover:text-red-300 font-semibold">Excluir</button>
                                             </td>
                                         </tr>
                                     ))}
@@ -836,15 +847,22 @@ const AdminDashboard = () => {
 
 // --- App Router ---
 const AppRouter = () => {
-    const { currentUser } = useAuth();
+    const { currentUser, loading } = useAuth();
     const location = useLocation();
 
-    // Redirect logic
+    if (loading) {
+        return (
+            <Layout>
+                <div className="text-white text-2xl">Carregando...</div>
+            </Layout>
+        );
+    }
+    
     if (currentUser) {
         if (currentUser.username === 'adm' && location.pathname !== '/admin') {
             return <Navigate to="/admin" replace />;
         }
-        if (currentUser.username !== 'adm' && (location.pathname === '/admin' || location.pathname === '/')) {
+        if (currentUser.username !== 'adm' && (location.pathname === '/admin' || location.pathname === '/' || location.pathname === '/signup')) {
             return <Navigate to="/dashboard" replace />;
         }
     } else {
