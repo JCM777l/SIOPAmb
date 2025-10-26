@@ -1,0 +1,5 @@
+{
+  "name": "SIOPAmb",
+  "description": "A web application for São Paulo's Military Police officers to log their daily activities and for administrators to view and manage this data through an interactive dashboard.",
+  "requestFramePermissions": []
+}
